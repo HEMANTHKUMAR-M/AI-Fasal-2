@@ -77,10 +77,31 @@ export default function SoilMap() {
         // Set loading state in context
         setContextSoilData({ isLoading: true });
 
-        const apiUrl = `https://rest.isric.org/soilgrids/v2.0/properties/query?lon=${lng}&lat=${lat}&properties=phh2o,nitrogen,soc,clay,silt,sand,cec,bulkdensity,ocdstock,potassium_extractable,phosphorus_extractable&depth=0-5cm`;
+        // Call soil data provider (configurable via `NEXT_PUBLIC_SOIL_API_BASE`)
 
+        // Helper: fetch with retries for transient 5xx errors (e.g., 502)
+        async function fetchWithRetries(url: string, attempts = 3, delayMs = 500): Promise<Response> {
+          let lastErr: any = null;
+          for (let i = 0; i < attempts; i++) {
+            try {
+              const res = await fetch(url);
+              if (!res.ok && res.status >= 500 && res.status < 600) {
+                lastErr = new Error(`Server error ${res.status}`);
+                // retry
+              } else {
+                return res;
+              }
+            } catch (e) {
+              lastErr = e;
+            }
+            await new Promise((r) => setTimeout(r, delayMs * Math.pow(2, i)));
+          }
+          throw lastErr ?? new Error('Failed to fetch');
+        }
+                    // Prefer server-side proxy to avoid CORS and to centralize retries/caching
+                    const apiUrl = `/api/soil?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`;
         try {
-          const response = await fetch(apiUrl);
+          const response = await fetchWithRetries(apiUrl, 3, 400);
           if (!response.ok) throw new Error("API Error: " + response.status);
 
           const data = await response.json();
@@ -153,7 +174,13 @@ export default function SoilMap() {
           setContextSoilData(soilDataObj);
           setShowRedirectButton(true);
         } catch (err: any) {
-          setSoilData([`Failed to fetch soil data. ${err.message}`]);
+          const msg = err?.message ?? String(err);
+          // Provide clearer messages for 5xx vs network/client errors
+          if (/502|503|504|Server error/.test(msg)) {
+            setSoilData([`Soil data service is temporarily unavailable (server error). Please try again later.`]);
+          } else {
+            setSoilData([`Failed to fetch soil data. ${msg}`]);
+          }
           setContextSoilData({ isLoading: false });
           setShowRedirectButton(false);
         }

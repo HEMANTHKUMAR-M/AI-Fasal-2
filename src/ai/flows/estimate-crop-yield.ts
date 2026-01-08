@@ -92,6 +92,79 @@ const PromptInputSchema = z.object({
   soilProperties: z.record(z.any()).describe('A key-value map of provided soil properties and their values.'),
 });
 
+// A simple rule-based fallback estimator when the AI service is unavailable.
+async function computeFallbackEstimation(input: EstimateCropYieldInput): Promise<EstimateCropYieldOutput> {
+  const baseYieldsPerAcre: Record<string, number> = {
+    rice: 4000,
+    paddy: 4000,
+    wheat: 3000,
+    maize: 2500,
+    corn: 2500,
+    soybean: 1500,
+    cotton: 800,
+    sugarcane: 70000,
+    default: 1200,
+  };
+
+  const cropKey = (input.cropType || '').toLowerCase();
+  let base = baseYieldsPerAcre.default;
+  for (const k of Object.keys(baseYieldsPerAcre)) {
+    if (k !== 'default' && cropKey.includes(k)) {
+      base = baseYieldsPerAcre[k];
+      break;
+    }
+  }
+
+  // Apply simple modifiers based on available soil properties
+  let modifier = 1;
+  if (typeof input.nitrogen === 'number') {
+    if (input.nitrogen >= 50) modifier *= 1.15;
+    else if (input.nitrogen <= 10) modifier *= 0.8;
+  }
+  if (typeof input.phosphorus === 'number') {
+    if (input.phosphorus >= 30) modifier *= 1.05;
+    else if (input.phosphorus <= 5) modifier *= 0.9;
+  }
+  if (typeof input.potassium === 'number') {
+    if (input.potassium >= 150) modifier *= 1.05;
+    else if (input.potassium <= 20) modifier *= 0.9;
+  }
+  if (typeof input.pH === 'number') {
+    if (input.pH >= 6 && input.pH <= 7.5) modifier *= 1.05;
+    else modifier *= 0.9;
+  }
+
+  const yieldPerAcre = Math.max(0, Math.round(base * modifier));
+  const confLower = Math.max(0, Math.round(yieldPerAcre * 0.75));
+  const confUpper = Math.round(yieldPerAcre * 1.25);
+
+  // Get market price using the existing local tool which reads src/data/crop_price.json
+  let marketPrice = 16.6; // fallback INR/kg
+  try {
+    const priceRes = await getMarketPriceTool({ cropType: input.cropType });
+    if (priceRes && typeof priceRes.price === 'number') marketPrice = priceRes.price;
+  } catch (e) {
+    console.warn('computeFallbackEstimation: getMarketPriceTool failed, using default price.');
+  }
+
+  const estimatedYield = yieldPerAcre * input.plotSize;
+  const estimatedTotalValue = Number((estimatedYield * marketPrice).toFixed(2));
+
+  return {
+    estimatedYield,
+    confidenceInterval: { lower: confLower * input.plotSize, upper: confUpper * input.plotSize },
+    marketPricePerKg: marketPrice,
+    currency: 'INR',
+    priceUnit: 'kg',
+    estimatedTotalValue,
+    explanation: `Fallback estimation used due to AI service unavailability. Base yield for ${input.cropType} assumed ${yieldPerAcre} kg/acre with modifiers applied based on provided soil inputs.`,
+    suggestions: [
+      'Provide more soil nutrient data for a better estimate when AI is available.',
+      'Irrigate and balance soil nutrients (NPK) to improve yields.',
+    ],
+  } as EstimateCropYieldOutput;
+}
+
 export async function estimateCropYield(input: EstimateCropYieldInput): Promise<EstimateCropYieldOutput> {
   return estimateCropYieldFlow(input);
 }
@@ -194,7 +267,26 @@ const estimateCropYieldFlow = ai.defineFlow(
       promptArgs.photoDataUri = rawInput.photoDataUri;
     }
     
-    const llmResponse = await prompt(promptArgs);
+    let llmResponse: any;
+    try {
+      llmResponse = await prompt(promptArgs);
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      // Log a concise error message only to avoid dumping large provider responses into logs
+      console.error('Error calling AI model:', msg);
+      // If the failure is quota-related, fall back to a simple rule-based estimator so the user still gets a result.
+      if (/quota/i.test(msg) || /QuotaFailure/.test(msg) || /exceeded your current quota/i.test(msg)) {
+        try {
+          console.warn('AI quota failure detected — using local fallback estimator.');
+          const fallback = await computeFallbackEstimation(rawInput);
+          return fallback;
+        } catch (fallbackErr) {
+          console.error('Fallback estimator failed:', String(fallbackErr));
+          throw new Error('AI service quota exceeded and fallback failed. Please check your Google Generative AI billing/quota settings or try again later.');
+        }
+      }
+      throw new Error('AI service error: ' + msg);
+    }
     const aiOutput = llmResponse.output;
 
     if (!aiOutput) {
@@ -205,12 +297,9 @@ const estimateCropYieldFlow = ai.defineFlow(
       const finishReason = firstCandidate?.finishReason ?? (llmResponse as any).finishReason ?? "Unknown";
       const safetyRatings = firstCandidate?.safetyRatings ?? (llmResponse as any).safety?.ratings ?? [];
       
-      console.error('LLM did not return valid structured output. Details:');
-      console.error('  Raw text response from LLM:', rawText);
-      console.error('  Finish reason:', finishReason);
-      console.error('  Safety ratings:', JSON.stringify(safetyRatings, null, 2));
-      console.error('  Input provided to LLM:', JSON.stringify(promptArgs, null, 2));
-  console.error('  Tool calls made by LLM (history):', JSON.stringify((llmResponse as any).history, null, 2));
+        // Avoid dumping large or sensitive content into logs. Log concise diagnostics only.
+        console.error('LLM returned no structured output. finishReason=%s, rawTextLength=%d', finishReason, String(rawText).length);
+        console.error('Prompt input keys:', Object.keys(promptArgs));
 
 
       let userMessage = 'The AI model did not return a valid estimation. Please check server logs for details.';

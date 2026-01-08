@@ -59,7 +59,9 @@ export async function handleEstimateCropYield(
 
     return { success: true, data: result };
   } catch (error) {
-    console.error('Error in handleEstimateCropYield:', error);
+    // Log a concise error message to avoid echoing large stacks or provider payloads to the terminal.
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('Error in handleEstimateCropYield:', msg);
     if (error instanceof z.ZodError) {
       return { success: false, error: error.errors.map(e => `${e.path.join('.')} - ${e.message}`).join(', ') };
     }
