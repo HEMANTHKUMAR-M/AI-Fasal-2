@@ -517,7 +517,7 @@ export function CropYieldForm() {
                 <Info className="mr-2 h-5 w-5 text-blue-500" />
                 Explanation
               </h3>
-              <p className="text-muted-foreground italic bg-muted p-3 rounded-md">{estimationResult.explanation}</p>
+              <div className="text-muted-foreground italic bg-muted p-3 rounded-md whitespace-pre-wrap">{estimationResult.explanation}</div>
             </div>
             
             {estimationResult.suggestions && estimationResult.suggestions.length > 0 && (

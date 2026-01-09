@@ -157,10 +157,11 @@ async function computeFallbackEstimation(input: EstimateCropYieldInput): Promise
     currency: 'INR',
     priceUnit: 'kg',
     estimatedTotalValue,
-    explanation: `Fallback estimation used due to AI service unavailability. Base yield for ${input.cropType} assumed ${yieldPerAcre} kg/acre with modifiers applied based on provided soil inputs.`,
+    explanation: `Estimated per-acre yield: ${yieldPerAcre.toLocaleString()} kg/acre.\nPlot size: ${input.plotSize} acres → Estimated total yield: ${estimatedYield.toLocaleString()} kg.\nMarket price used: ${marketPrice.toFixed(2)} ${'INR'} / ${'kg'}.\nEstimated total value: ${estimatedTotalValue.toLocaleString()} INR.\n`,
     suggestions: [
-      'Provide more soil nutrient data for a better estimate when AI is available.',
-      'Irrigate and balance soil nutrients (NPK) to improve yields.',
+      'Provide more soil nutrient data (N, P, K) and moisture for a better estimate when AI is available.',
+      'Maintain soil pH between 6.0–7.5 for most crops; apply lime or sulfur to adjust pH as needed.',
+      'Use balanced NPK fertilization and local extension services recommendations to improve yields.',
     ],
   } as EstimateCropYieldOutput;
 }
@@ -329,16 +330,21 @@ const estimateCropYieldFlow = ai.defineFlow(
         upper: aiOutput.confidenceIntervalPerAcre.upper * plotSize,
     };
 
+    // Ensure explanation is a plain string (some LLMs may return objects or arrays)
+    const explanationText = typeof aiOutput.explanation === 'string'
+      ? aiOutput.explanation
+      : JSON.stringify(aiOutput.explanation, null, 2);
+
     // Construct the final output object that the user will see
     const finalOutput: EstimateCropYieldOutput = {
-        estimatedYield,
-        estimatedTotalValue,
-        confidenceInterval,
-        marketPricePerKg: aiOutput.marketPricePerKg,
-        currency: aiOutput.currency,
-        priceUnit: aiOutput.priceUnit,
-        explanation: aiOutput.explanation,
-        suggestions: aiOutput.suggestions,
+      estimatedYield,
+      estimatedTotalValue,
+      confidenceInterval,
+      marketPricePerKg: aiOutput.marketPricePerKg,
+      currency: aiOutput.currency,
+      priceUnit: aiOutput.priceUnit,
+      explanation: explanationText,
+      suggestions: aiOutput.suggestions,
     };
 
     return finalOutput;
